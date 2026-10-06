@@ -1,0 +1,301 @@
+---
+title: "Le gradient boosting dans R"
+subtitle: "TD : prédire le prix d'un diamant"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r options, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 7, fig.height = 4.5)
+```
+
+**Objectif du TD** : appliquer le gradient boosting dans R, sur l'exemple présenté en partie 2, et voir comment régler la méthode.
+
+**Packages nécessaires** (à installer une seule fois avec `install.packages()` si besoin) :
+
+```{r packages}
+library(tidyverse)  # manipulation des données et graphiques (ggplot2)
+library(gbm)        # gradient boosting
+library(ranger)     # forêt aléatoire (pour la comparaison de la partie 7)
+```
+
+------------------------------------------------------------------------
+
+# 1. Le problème
+
+On veut **prédire le prix d'un diamant à partir de son poids** (en carats).
+
+On utilise le jeu de données `diamonds`, disponible directement avec ggplot2 : il contient près de 54 000 diamants. Pour que ce soit plus lisible, on en tire 300 au hasard, et on ne garde que deux variables : le poids (`carat`) et le prix (`price`).
+
+```{r donnees}
+set.seed(1234)  # pour obtenir toujours le même tirage
+# 300 diamants au hasard : on garde le poids et le prix
+diamants <- diamonds[sample(nrow(diamonds), 300), c("carat", "price")]
+
+# Nuage de points : prix en fonction du poids
+ggplot(diamants) + aes(x = carat, y = price) +
+  geom_point(alpha = 0.4) +
+  labs(x = "Poids (carats)", y = "Prix ($)")
+```
+
+> Plus un diamant est lourd, plus il est cher, mais la relation n'est pas une droite : une régression linéaire serait mal adaptée.
+
+------------------------------------------------------------------------
+
+# 2. Le boosting dans R : `gbm` et `predict`
+
+## Ajuster le modèle
+
+Le gradient boosting s'utilise avec la fonction `gbm`. On lui donne la formule, les données, et deux réglages :
+
+| Argument    | Rôle                                                     |
+|-------------|----------------------------------------------------------|
+| `n.trees`   | le nombre d'arbres **B**                                 |
+| `shrinkage` | le pas **λ** (la part de chaque correction qu'on ajoute) |
+
+```{r modele1}
+# Boosting : B = 50 arbres, λ = 0,1
+modele1 <- gbm(price ~ carat,
+               data = diamants,
+               n.trees = 50,
+               shrinkage = 0.1)
+```
+
+Sans autre précision, `gbm` utilise la perte quadratique.
+
+## Prédire de nouveaux diamants
+
+Une fois le modèle ajusté, on prédit avec `predict`. On précise le nombre d'arbres à utiliser : `gbm` garde en mémoire tous les modèles intermédiaires, on peut donc prédire avec n'importe quel nombre d'arbres entre 1 et 50.
+
+```{r predict}
+# 3 nouveaux diamants, de 0,5, 1 et 2 carats
+nouveaux_diamants <- tibble(carat = c(0.5, 1, 2))
+
+# Prix prédits par le modèle avec ses 50 arbres
+predict(modele1,
+        newdata = nouveaux_diamants,
+        n.trees = 50)
+```
+
+## Une fonction pour tracer le modèle
+
+Pour la suite, ce code est rangé dans une fonction, `trace_boost(B, lambda)`. Elle ajuste le boosting avec B arbres et un pas λ, puis trace la courbe des prix prédits par-dessus les 300 diamants.
+
+```{r fonction}
+trace_boost <- function(B, lambda = 0.1) {
+
+  # 1. Ajuster le boosting avec B arbres et un pas lambda
+  set.seed(1234)  # gbm tire des données au hasard : on fixe la graine
+  modele <- gbm(price ~ carat,
+                data = diamants,
+                distribution = "gaussian",
+                n.trees = B,
+                shrinkage = lambda)
+
+  # 2. Calculer les points de la courbe :
+  #    500 poids régulièrement espacés, et le prix prédit pour chacun
+  courbe <- tibble(carat = seq(min(diamants$carat),
+                               max(diamants$carat),
+                               length.out = 500))
+  courbe$prix_predit <- predict(modele,
+                                newdata = courbe,
+                                n.trees = B)
+
+  # 3. Tracer les 300 diamants (points) et la courbe des prix prédits (rouge)
+  ggplot() +
+    geom_point(data = diamants,
+               aes(x = carat, y = price),
+               alpha = 0.4) +
+    geom_line(data = courbe,
+              aes(x = carat, y = prix_predit),
+              color = "red",
+              linewidth = 1) +
+    labs(x = "Poids (carats)",
+         y = "Prix ($)",
+         title = paste0("B = ", B, " arbres, λ = ", lambda)) +
+    coord_cartesian(ylim = c(0, 20000))  # même axe pour tous les graphiques
+}
+```
+
+------------------------------------------------------------------------
+
+# 3. L'effet du nombre d'arbres B
+
+On garde le pas λ = 0,1 et on fait varier le nombre d'arbres.
+
+### Avec 1 arbre
+
+```{r B1}
+trace_boost(B = 1)
+```
+
+> Le modèle part du prix moyen, et l'unique arbre fait une seule coupure. Comme on n'ajoute qu'un dixième de sa correction, on obtient une toute petite marche : le modèle prédit presque le même prix pour tous les diamants. **Il est beaucoup trop simple.**
+
+### Avec 50 arbres
+
+```{r B50}
+trace_boost(B = 50)
+```
+
+> Chaque arbre a corrigé un peu les erreurs des précédents. En additionnant toutes ces petites marches, **la courbe suit bien la tendance des prix.**
+
+### Avec 20 000 arbres
+
+```{r B20000}
+trace_boost(B = 20000)
+```
+
+> Une fois la tendance apprise, le modèle fait des pics pour coller à certains diamants en particulier : c'est le **sur-ajustement**. Sur de nouveaux diamants, ces pics ne correspondraient à rien.
+
+**À retenir : plus d'arbres n'est pas toujours mieux.** Le nombre d'arbres se choisit avec soin (partie 6).
+
+------------------------------------------------------------------------
+
+# 4. L'effet du pas λ
+
+On garde 50 arbres, mais on divise le pas par 10.
+
+```{r lambda, fig.show="hold", out.width="50%", fig.width=6}
+trace_boost(B = 50, lambda = 0.1)
+trace_boost(B = 50, lambda = 0.01)
+```
+
+> Avec λ = 0,01, chaque arbre n'apporte qu'un centième de sa correction : au bout de 50 arbres, le modèle est encore loin des données, et sous-estime nettement les gros diamants.
+
+**À retenir : un petit pas demande plus d'arbres, mais le modèle généralise souvent un peu mieux. B et λ se règlent donc ensemble.** En pratique, on fixe un petit λ (entre 0,01 et 0,1) et on cherche le meilleur B.
+
+------------------------------------------------------------------------
+
+# 5. Le vrai problème : toutes les variables
+
+Jusqu'ici, on n'utilisait que le poids. On utilise maintenant **toutes les caractéristiques** du diamant : taille, couleur, pureté, dimensions…
+
+## Séparer les données
+
+On tire 10 000 diamants, et on les sépare en deux :
+
+- un **échantillon d'apprentissage** (`app`, 70 %), pour construire le modèle ;
+- un **échantillon test** (`test`, 30 %), pour juger le modèle sur des diamants qu'il n'a jamais vus.
+
+```{r separation}
+set.seed(1234)
+# 10 000 diamants tirés au hasard (dans un ordre aléatoire)
+echantillon <- diamonds[sample(nrow(diamonds), 10000), ]
+
+# 70 % pour apprendre, 30 % pour tester
+app  <- echantillon[1:7000, ]
+test <- echantillon[7001:10000, ]
+```
+
+## Ajuster le boosting
+
+Le code est le même qu'avant, avec trois changements :
+
+| Argument | Rôle |
+|----------------------|--------------------------------------------------|
+| `price ~ .` | le point veut dire : toutes les variables |
+| `interaction.depth = 3` | des arbres à 3 coupures, pour capter les effets combinés entre variables (par exemple un diamant à la fois gros et très pur) |
+| `cv.folds = 5` | une validation croisée à 5 blocs, pour choisir B (partie 6) |
+
+```{r modele2}
+set.seed(1234)
+modele2 <- gbm(price ~ .,
+               data = app,
+               distribution = "gaussian",
+               n.trees = 1000,
+               shrinkage = 0.1,
+               interaction.depth = 3,
+               cv.folds = 5)
+```
+
+------------------------------------------------------------------------
+
+# 6. Choisir B par validation croisée
+
+Grâce à `cv.folds = 5`, `gbm` a calculé l'erreur de validation pour chaque nombre d'arbres, de 1 à 1000. La fonction `gbm.perf` cherche le nombre d'arbres qui la minimise.
+
+```{r gbm-perf}
+# nombre d'arbres qui minimise l'erreur de validation
+nb_opt <- gbm.perf(modele2, method = "cv", plot.it = FALSE)
+nb_opt
+```
+
+Pour voir ce choix, on trace les deux erreurs (en dollars) en fonction du nombre d'arbres :
+
+```{r graphe-erreurs}
+erreurs <- tibble(B = 1:1000,
+                  Entrainement = sqrt(modele2$train.error),
+                  Validation = sqrt(modele2$cv.error)) |>
+  pivot_longer(-B, names_to = "type", values_to = "erreur")
+
+ggplot(erreurs) + aes(x = B, y = erreur, color = type) +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = nb_opt, linetype = "dashed", color = "blue") +
+  coord_cartesian(ylim = c(400, 1000)) +
+  labs(x = "Nombre d'arbres B",
+       y = "Racine de l'erreur quadratique moyenne ($)",
+       color = NULL)
+```
+
+> - **En rouge, l'erreur d'entraînement**, mesurée sur les diamants qui ont servi à construire le modèle : elle baisse sans arrêt. Elle ne peut donc pas servir à choisir B (elle dirait toujours de prendre le maximum).
+> - **En bleu, l'erreur de validation**, mesurée sur des diamants mis de côté à tour de rôle : elle baisse vite au début, puis se stabilise vers 500 arbres.
+> - **La ligne pointillée** marque son minimum, à `r nb_opt` arbres.
+
+**À retenir : on choisit B avec l'erreur de validation, jamais avec l'erreur d'entraînement.**
+
+------------------------------------------------------------------------
+
+# 7. Résultats sur l'échantillon test
+
+On juge maintenant le modèle sur les 3000 diamants de l'échantillon test, qu'il n'a jamais vus. On compare trois approches : prédire toujours le prix moyen, une forêt aléatoire, et le boosting.
+
+```{r resultats, fig.height=3.5}
+# Prédictions du boosting, avec le nombre d'arbres retenu
+prev_boost <- predict(modele2,
+                      newdata = test,
+                      n.trees = nb_opt)
+
+# Prédictions d'une forêt aléatoire, ajustée sur les mêmes données
+set.seed(1234)
+foret <- ranger(price ~ .,
+                data = app)
+prev_foret <- predict(foret,
+                      data = test)$predictions
+
+# Racine de l'erreur quadratique moyenne sur le test (en dollars)
+erreur <- function(prev) sqrt(mean((test$price - prev)^2))
+resultats <- tibble(methode = c("Prix moyen", "Forêt aléatoire", "Boosting"),
+                    erreur = c(sd(test$price), erreur(prev_foret), erreur(prev_boost)))
+resultats
+
+ggplot(resultats) +
+  aes(x = erreur, y = reorder(methode, erreur), fill = methode) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = round(erreur)), hjust = -0.2, size = 5) +
+  labs(x = "Racine de l'erreur quadratique moyenne ($)", y = NULL) +
+  xlim(0, 4500)
+```
+
+> En prédisant toujours le prix moyen, on se tromperait d'environ `r round(sd(test$price))` dollars. La forêt aléatoire se trompe d'environ `r round(erreur(prev_foret))` dollars, et le boosting d'environ `r round(erreur(prev_boost))` dollars : les deux divisent l'erreur par 6.
+
+**Sur cet exemple, le boosting fait un peu mieux que la forêt aléatoire.** L'écart est faible : sur d'autres données, la forêt peut l'emporter.
+
+------------------------------------------------------------------------
+
+# 8. À retenir : le boosting dans R en 4 étapes
+
+| Étape | Ce qu'on fait | Fonction |
+|------------------------|------------------------|------------------------|
+| 1\. Séparer | échantillon d'apprentissage / échantillon test (par exemple 70 % / 30 %) | `sample()` |
+| 2\. Ajuster | le boosting sur l'apprentissage, avec la validation croisée | `gbm(..., n.trees, shrinkage, interaction.depth, cv.folds)` |
+| 3\. Choisir B | le nombre d'arbres qui minimise l'erreur de validation | `gbm.perf(..., method = "cv")` |
+| 4\. Prédire et évaluer | sur l'échantillon test, avec le B retenu | `predict(..., n.trees = B)` |
+
+**En pratique** : un petit λ (entre 0,01 et 0,1), des arbres de 2 à 5 coupures, et B choisi par validation croisée.
+
+Pour aller plus loin, `gbm` a d'autres arguments, comme `distribution`, qui permet de changer la perte (par exemple `"bernoulli"` pour faire de la classification).
